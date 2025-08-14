@@ -44,6 +44,10 @@ COORD_BITS = {0b00: "BEAM", 0b01: "INSTRUMENT", 0b10: "SHIP", 0b11: "EARTH"}
 # Helpers
 # ------------------------------
 
+def now_utc_seconds() -> str:
+    """Current UTC time truncated to whole seconds in ISO-8601 format."""
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
 def checksum_ok(frame: bytes, payload_len: int) -> bool:
     """Validate checksum on a PD4 frame.
 
@@ -198,14 +202,17 @@ class IOThreads:
         self.get_output_fields = get_output_fields
         self.stop_evt = threading.Event()
         self.rx_thread = None
+        self.tx_thread = None
         self.tcp_tx_sock = None
         self.buf = bytearray()
         self.ser = None
+        self.latest_parsed = None
 
     # ---- RX control
     def start_rx(self):
         self.stop_rx()
         self.stop_evt.clear()
+        self.latest_parsed = None
         mode = self.get_input_mode()
         if mode == 'TCP':
             host, port = self.get_input_params()
@@ -217,12 +224,17 @@ class IOThreads:
             port, baud, bytesize, parity, stopbits = self.get_input_params()
             self.rx_thread = threading.Thread(target=self._rx_serial_loop, args=(port, baud, bytesize, parity, stopbits), daemon=True)
         self.rx_thread.start()
+        self.tx_thread = threading.Thread(target=self._tx_loop, daemon=True)
+        self.tx_thread.start()
 
     def stop_rx(self):
         self.stop_evt.set()
         if self.rx_thread and self.rx_thread.is_alive():
             self.rx_thread.join(timeout=1.0)
         self.rx_thread = None
+        if self.tx_thread and self.tx_thread.is_alive():
+            self.tx_thread.join(timeout=1.0)
+        self.tx_thread = None
         if self.tcp_tx_sock:
             try:
                 self.tcp_tx_sock.close()
@@ -277,10 +289,20 @@ class IOThreads:
             except Exception as e:
                 self.on_raw(f"[Parse error] {e}\n")
                 continue
-            # Attach timestamp here so GUI & TX share the same value
-            parsed['ts'] = datetime.now(timezone.utc).isoformat()
-            self.on_parsed(parsed)
-            self.forward(parsed)
+            parsed_with_ts = dict(parsed)
+            parsed_with_ts['ts'] = now_utc_seconds()
+            self.on_parsed(parsed_with_ts)
+            self.latest_parsed = parsed
+
+    def _tx_loop(self):
+        while not self.stop_evt.is_set():
+            latest = self.latest_parsed
+            if latest is not None:
+                msg = dict(latest)
+                msg['ts'] = now_utc_seconds()
+                self.forward(msg)
+            if self.stop_evt.wait(1.0):
+                break
 
     # ---- TX (TCP/UDP)
     def ensure_tcp_tx(self, host: str, port: int):
