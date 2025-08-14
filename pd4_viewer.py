@@ -45,10 +45,20 @@ COORD_BITS = {0b00: "BEAM", 0b01: "INSTRUMENT", 0b10: "SHIP", 0b11: "EARTH"}
 # ------------------------------
 
 def checksum_ok(frame: bytes, payload_len: int) -> bool:
-    if len(frame) < 6:
+    """Validate checksum on a PD4 frame.
+
+    The previous implementation summed *all* bytes in ``frame`` except the
+    final two, assuming no extra bytes were present. If callers passed a buffer
+    that contained a valid frame followed by additional data, the checksum would
+    be computed over the extra bytes and would read the checksum from the very
+    end of the buffer, causing false negatives. ``payload_len`` indicates the
+    expected payload size, allowing us to ignore any trailing bytes.
+    """
+    frame_len = 4 + payload_len
+    if len(frame) < frame_len + 2:
         return False
-    data = frame[:-2]
-    got = struct.unpack_from('<H', frame, len(frame)-2)[0]
+    data = frame[:frame_len]
+    got = struct.unpack_from('<H', frame, frame_len)[0]
     s = sum(data) & 0xFFFF
     return got == s or ((s + got) & 0xFFFF) == 0
 
